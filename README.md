@@ -47,7 +47,7 @@ Each org costs about 6 API calls, which is well within the 5,000 calls/hour limi
 |---|---|
 | **Latest** | This run's figures, one row per org |
 | **History** | Every run's figures, one row per org per run, with a **Date Time** column (`YYYY-MM-DD HH:MM`). A re-run within the same minute replaces that run's figures. |
-| **Trend …** | One sheet per figure (sites, online/offline devices, clients and audit entries). Orgs run down the side and run times across the top, with a line chart below. |
+| **Trend …** | One sheet per figure (sites, online/offline devices, clients and audit entries). Orgs run down the side and run times across the top, with a line chart below. Orgs that are 0 in every run are left off the chart, but they stay in the table. |
 
 Close the workbook in Excel before running the script. Otherwise the script can't save it.
 

@@ -26,7 +26,10 @@ from urllib.parse import urlparse
 
 import requests
 from openpyxl import Workbook, load_workbook
-from openpyxl.chart import LineChart, Reference
+from openpyxl.chart import LineChart, Reference, Series
+from openpyxl.chart.data_source import AxDataSource, StrRef
+from openpyxl.chart.shapes import GraphicalProperties
+from openpyxl.drawing.line import LineProperties
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -363,17 +366,49 @@ def write_trend_sheet(wb, title, key, history):
     for i in range(3, len(dates) + 3):
         ws.column_dimensions[get_column_letter(i)].width = 17
 
-    if dates and org_keys:
-        chart = LineChart()
-        chart.title = title.replace("Trend ", "")
-        chart.y_axis.title = chart.title
-        chart.x_axis.title = "Run"
-        chart.height, chart.width = 10, 24
-        # One series per org: each row is a series, dates (header) are categories.
-        data = Reference(ws, min_col=2, max_col=len(dates) + 2, min_row=2, max_row=len(org_keys) + 1)
-        chart.add_data(data, from_rows=True, titles_from_data=True)
-        chart.set_categories(Reference(ws, min_col=3, max_col=len(dates) + 2, min_row=1))
-        ws.add_chart(chart, f"A{len(org_keys) + 4}")
+    # Chart only the orgs with a non-zero value in at least one run - the
+    # all-zero ones are still in the table but would just clutter the chart.
+    plotted = [i for i, ok in enumerate(org_keys, start=2)
+               if any(values.get((ok[0], ok[1], d)) for d in dates)]
+    chart_row = len(org_keys) + 4
+    if not dates or not plotted:
+        ws.cell(chart_row, 1, "No chart - every org is 0 for this figure.").font = Font(italic=True)
+        return
+
+    chart = LineChart()
+    chart.title = title.replace("Trend ", "")
+    chart.y_axis.title = chart.title
+    chart.x_axis.title = "Run"
+    # openpyxl hides both axes by default in current Excel - show them.
+    chart.x_axis.delete = False
+    chart.y_axis.delete = False
+    chart.y_axis.scaling.min = 0
+    chart.y_axis.number_format = "#,##0"
+    chart.y_axis.majorGridlines.spPr = GraphicalProperties(ln=LineProperties(solidFill="D9D9D9"))
+    chart.x_axis.tickLblPos = "low"
+    chart.legend.position = "b"
+    # Grow with the number of orgs so the legend has room under the plot.
+    chart.width = min(40, max(24, 6 + 2 * len(dates)))
+    chart.height = 11 + 0.45 * len(plotted)
+
+    categories = Reference(ws, min_col=3, max_col=len(dates) + 2, min_row=1)
+    for row in plotted:
+        series = Series(Reference(ws, min_col=3, max_col=len(dates) + 2, min_row=row),
+                        title=ws.cell(row, 2).value)
+        # Markers so a single run (one point, no line yet) is still visible.
+        series.marker.symbol = "circle"
+        series.marker.size = 6
+        series.smooth = False
+        chart.series.append(series)
+    # Run times are text, so point the categories at them as strings
+    # (a numeric reference makes Excel label the runs 1, 2, 3 ...).
+    cat_ref = str(categories)  # e.g. 'Trend APs Online'!$C$1:$E$1
+    for series in chart.series:
+        series.cat = AxDataSource(strRef=StrRef(f=cat_ref))
+    ws.add_chart(chart, f"A{chart_row}")
+    if len(plotted) < len(org_keys):
+        ws.cell(chart_row - 1, 1, f"{len(org_keys) - len(plotted)} org(s) that are 0 in every run "
+                                  f"are left off the chart.").font = Font(italic=True)
 
 
 def read_history(wb):
