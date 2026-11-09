@@ -6,11 +6,11 @@ For every API key in the ini, the script finds every org the key can see and rep
 
 - Org name and number of sites
 - APs, switches and gateways: total, online and offline
-- Unique wireless and wired clients (distinct MACs) in the last 24 hours
+- Unique wireless and wired clients (distinct MACs) in the last 24 hours. Wired clients include any Mist devices that the switches see as clients.
 - Audit log entries, and distinct admins, in the last 24 hours
 - **Usage**: *Active* if there were any clients or audit log entries in the last 24 hours, otherwise *Idle*
 
-The results are printed as a table and saved to an Excel workbook that builds up a trend over time.
+The results are printed as a table and saved to an Excel workbook. Every run is time-stamped, so the workbook builds up a trend over time.
 
 ## Setup
 
@@ -45,15 +45,15 @@ Each org costs about 6 API calls, which is well within the 5,000 calls/hour limi
 
 | Sheet | Contents |
 |---|---|
-| **Latest** | Today's figures, one row per org |
-| **History** | Every day's figures, one row per org per day. A second run on the same day replaces that day's figures. |
-| **Trend …** | One sheet per figure (sites, online/offline devices, clients and audit entries). Orgs run down the side and dates across the top, with a line chart below. |
+| **Latest** | This run's figures, one row per org |
+| **History** | Every run's figures, one row per org per run, with a **Date Time** column (`YYYY-MM-DD HH:MM`). A re-run within the same minute replaces that run's figures. |
+| **Trend …** | One sheet per figure (sites, online/offline devices, clients and audit entries). Orgs run down the side and run times across the top, with a line chart below. |
 
 Close the workbook in Excel before running the script. Otherwise the script can't save it.
 
 ## Failures
 
-The script checks every API key first. If any key, org discovery or org collection fails (for example 401, 403 or 429), the script lists the failures and exits with code 1, **writing nothing**. The workbook never holds a partial day.
+The script checks every API key first. If any key, org discovery or org collection fails (for example 401, 403 or 429), the script lists the failures and exits with code 1, **writing nothing**. The workbook never holds a partial run.
 
 ## Zscaler / proxies
 

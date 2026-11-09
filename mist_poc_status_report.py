@@ -10,18 +10,18 @@ finds every org the key can see and collects:
   * audit log entries (and distinct admins) in the last 24 hours
 
 The results are printed as a table and saved to an Excel workbook. The
-workbook keeps a History sheet with one row per org per day (re-running on
-the same day replaces that day's figures), a Latest sheet, and one Trend
-sheet per figure (orgs down the side, dates across the top, with a chart).
+workbook keeps a History sheet with one row per org per run (date and time),
+a Latest sheet, and one Trend sheet per figure (orgs down the side, run
+times across the top, with a chart).
 
 If any cloud or org fails, the script stops, lists the failures and writes
-nothing, so the workbook never holds a partial day.
+nothing, so the workbook never holds a partial run.
 """
 import configparser
 import os
 import sys
 import time
-from datetime import date, datetime
+from datetime import datetime
 from urllib.parse import urlparse
 
 import requests
@@ -52,7 +52,7 @@ IDLE_FILL = PatternFill("solid", fgColor="FFC7CE")
 
 # (header, key) for every column in the History / Latest sheets.
 COLUMNS = [
-    ("Date", "date"),
+    ("Date Time", "date"),
     ("Cloud", "cloud"),
     ("Org Name", "org_name"),
     ("Org ID", "org_id"),
@@ -196,7 +196,9 @@ def count_distinct(host, token, path, distinct, start, end):
     if len(results) >= PAGE_LIMIT and data.get("total", 0) > len(results):
         # More distinct values than one response holds - fall back to 'total'.
         return results, data["total"]
-    return results, len(results)
+    # The API can list the same value twice (seen with wired client MACs),
+    # so count unique values rather than rows.
+    return results, len({r.get(distinct) for r in results})
 
 
 # --------------------------------------------------------------------------
@@ -250,8 +252,8 @@ def discover_orgs(host, token, self_data):
 # --------------------------------------------------------------------------
 # Per-org figures
 # --------------------------------------------------------------------------
-def collect_org(host, token, org_id, org_name, start, end, today):
-    row = {"date": today, "cloud": host, "org_name": org_name, "org_id": org_id}
+def collect_org(host, token, org_id, org_name, start, end, run_time):
+    row = {"date": run_time, "cloud": host, "org_name": org_name, "org_id": org_id}
 
     row["sites"] = len(api_get_all(host, token, f"/orgs/{org_id}/sites"))
 
@@ -329,7 +331,7 @@ def write_rows_sheet(wb, title, rows, index):
     for r in rows:
         ws.append([r.get(k) for k in KEYS])
     style_header_row(ws, len(HEADERS))
-    widths = {"Date": 12, "Cloud": 18, "Org Name": 32, "Org ID": 38, "Usage": 9}
+    widths = {"Date Time": 17, "Cloud": 18, "Org Name": 32, "Org ID": 38, "Usage": 9}
     for i, h in enumerate(HEADERS, 1):
         ws.column_dimensions[get_column_letter(i)].width = widths.get(h, 12)
     usage_col = KEYS.index("usage") + 1
@@ -359,13 +361,13 @@ def write_trend_sheet(wb, title, key, history):
     ws.column_dimensions["A"].width = 18
     ws.column_dimensions["B"].width = 32
     for i in range(3, len(dates) + 3):
-        ws.column_dimensions[get_column_letter(i)].width = 12
+        ws.column_dimensions[get_column_letter(i)].width = 17
 
     if dates and org_keys:
         chart = LineChart()
         chart.title = title.replace("Trend ", "")
         chart.y_axis.title = chart.title
-        chart.x_axis.title = "Date"
+        chart.x_axis.title = "Run"
         chart.height, chart.width = 10, 24
         # One series per org: each row is a series, dates (header) are categories.
         data = Reference(ws, min_col=2, max_col=len(dates) + 2, min_row=2, max_row=len(org_keys) + 1)
@@ -384,11 +386,13 @@ def read_history(wb):
         if not any(values):
             continue
         rec = dict(zip(header, values))
+        if rec.get("Date Time") is None:
+            rec["Date Time"] = rec.get("Date")  # older workbooks: date only
         rows.append({k: rec.get(h) for h, k in COLUMNS})
     return rows
 
 
-def save_workbook(new_rows, today):
+def save_workbook(new_rows):
     if os.path.exists(OUTPUT_FILE):
         try:
             wb = load_workbook(OUTPUT_FILE)
@@ -400,10 +404,12 @@ def save_workbook(new_rows, today):
         wb.remove(wb.active)
         print(f"\nCreating {OUTPUT_FILE}")
 
-    # One row per org per day: drop today's earlier figures for these orgs.
+    # One row per org per run - every run is kept, except that a re-run in
+    # the same minute (same timestamp) replaces the earlier figures.
+    run_time = new_rows[0]["date"]
     replaced = {(r["cloud"], r["org_id"]) for r in new_rows}
     history = [r for r in read_history(wb)
-               if not (r["date"] == today and (r["cloud"], r["org_id"]) in replaced)]
+               if not (r["date"] == run_time and (r["cloud"], r["org_id"]) in replaced)]
     history.extend(new_rows)
     history.sort(key=lambda r: (r["date"], r["cloud"], (r["org_name"] or "").lower()))
 
@@ -417,8 +423,8 @@ def save_workbook(new_rows, today):
         wb.save(OUTPUT_FILE)
     except PermissionError:
         sys.exit(f"Could not save {OUTPUT_FILE} - close it in Excel and run again.")
-    days = len({r["date"] for r in history})
-    print(f"Saved: {len(latest)} org(s) today, {days} day(s) of history.")
+    runs = len({r["date"] for r in history})
+    print(f"Saved: {len(latest)} org(s) this run, {runs} run(s) of history.")
 
 
 def fail(title, failures):
@@ -434,7 +440,7 @@ def main():
     keys = load_keys()
     now = int(time.time())
     start, end = now - WINDOW_SECONDS, now
-    today = date.today().isoformat()
+    run_time = datetime.now().strftime("%Y-%m-%d %H:%M")
     print(f"Mist POC status report - {datetime.now():%Y-%m-%d %H:%M} "
           f"(last 24h window), {len(keys)} API key(s)")
 
@@ -477,14 +483,14 @@ def main():
     for i, (host, token, org_id, org_name) in enumerate(work, 1):
         print(f"  [{i}/{len(work)}] {host}  {org_name}")
         try:
-            rows.append(collect_org(host, token, org_id, org_name, start, end, today))
+            rows.append(collect_org(host, token, org_id, org_name, start, end, run_time))
         except ApiError as e:
             failures.append((f"{host} / {org_name}", str(e)))
     if failures:
         fail("Some orgs failed", failures)
 
     print_table(sorted(rows, key=lambda r: (r["cloud"], r["org_name"].lower())))
-    save_workbook(rows, today)
+    save_workbook(rows)
 
 
 if __name__ == "__main__":
