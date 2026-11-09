@@ -16,6 +16,10 @@ gc3 = YOUR_GC3_TOKEN_1_HERE, YOUR_GC3_TOKEN_2_HERE
 output_file = mist_poc_status.xlsx
 # Optional comma-separated org names or org IDs to leave out of the report.
 exclude_orgs =
+# Audit log entries by the owners of the API keys above are never counted,
+# so your own logins and API calls don't make a POC look used. Add any other
+# internal admins here (comma-separated emails, or exact admin names).
+exclude_admins =
 
 # Optional - only needed if you're behind a TLS-inspecting proxy (e.g.
 # Zscaler). Delete this whole section, or leave the values blank, to use

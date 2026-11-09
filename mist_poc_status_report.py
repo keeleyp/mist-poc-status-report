@@ -48,6 +48,11 @@ OUTPUT_FILE = os.path.join(SCRIPT_DIR, os.path.expanduser(
     config.get("settings", "output_file", fallback="mist_poc_status.xlsx")))
 EXCLUDE_ORGS = {x.strip().lower() for x in
                 config.get("settings", "exclude_orgs", fallback="").split(",") if x.strip()}
+# Audit log entries by these admins (emails or exact admin names) are not
+# counted. The owners of the API keys in [clouds] are always excluded too,
+# so our own logins don't make a POC look used.
+EXCLUDE_ADMINS = {x.strip().lower() for x in
+                  config.get("settings", "exclude_admins", fallback="").split(",") if x.strip()}
 
 REQUEST_TIMEOUT = 60
 PAGE_LIMIT = 1000
@@ -270,7 +275,15 @@ def discover_orgs(host, token, self_data):
 # --------------------------------------------------------------------------
 # Per-org figures
 # --------------------------------------------------------------------------
-def collect_org(host, token, org_id, org_name, start, end, run_time):
+def is_excluded_admin(admin_name, excluded):
+    """admin_name looks like 'First Last email@x.com'. Emails match anywhere
+    in it, anything else must match the whole name."""
+    name = (admin_name or "").strip().lower()
+    words = set(name.split())
+    return any((x in words) if "@" in x else (x == name) for x in excluded)
+
+
+def collect_org(host, token, org_id, org_name, start, end, run_time, excluded_admins):
     row = {"date": run_time, "cloud": host, "org_name": org_name, "org_id": org_id}
 
     row["sites"] = len(api_get_all(host, token, f"/orgs/{org_id}/sites"))
@@ -289,10 +302,11 @@ def collect_org(host, token, org_id, org_name, start, end, run_time):
                                                 "mac", start, end)
     _, row["wired_clients"] = count_distinct(host, token, f"/orgs/{org_id}/wired_clients/count",
                                              "mac", start, end)
-    admins, n_admins = count_distinct(host, token, f"/orgs/{org_id}/logs/count",
+    admins, _ = count_distinct(host, token, f"/orgs/{org_id}/logs/count",
                                       "admin_name", start, end)
+    admins = [a for a in admins if not is_excluded_admin(a.get("admin_name"), excluded_admins)]
     row["audit_entries"] = sum(a.get("count", 0) for a in admins)
-    row["audit_admins"] = n_admins
+    row["audit_admins"] = len({a.get("admin_name") for a in admins})
 
     used = row["wireless_clients"] or row["wired_clients"] or row["audit_entries"]
     row["usage"] = "Active" if used else "Idle"
@@ -332,7 +346,7 @@ def print_table(rows):
         print(fmt(c))
     active = sum(r["usage"] == "Active" for r in rows)
     print(f"\n{len(rows)} org(s): {active} active, {len(rows) - active} idle "
-          f"(active = any client or audit log entry in the last 24 hours)")
+          f"(active = any client, or audit log entry by someone other than us, in the last 24 hours)")
 
 
 def style_header_row(ws, n_cols):
@@ -645,6 +659,14 @@ def main():
     if failures:
         fail("Some API keys failed", failures)
 
+    # Our own accounts' audit entries (key owners + exclude_admins) don't count.
+    excluded_admins = set(EXCLUDE_ADMINS)
+    for _, _, self_data in checked:
+        owner = (self_data.get("email") or self_data.get("name") or "").strip().lower()
+        if owner:
+            excluded_admins.add(owner)
+    print(f"  Audit entries by these admins are not counted: {', '.join(sorted(excluded_admins))}")
+
     # 2. Find orgs for every key.
     work, seen = [], set()
     for host, token, self_data in checked:
@@ -673,7 +695,7 @@ def main():
     for i, (host, token, org_id, org_name) in enumerate(work, 1):
         print(f"  [{i}/{len(work)}] {host}  {org_name}")
         try:
-            rows.append(collect_org(host, token, org_id, org_name, start, end, run_time))
+            rows.append(collect_org(host, token, org_id, org_name, start, end, run_time, excluded_admins))
         except ApiError as e:
             failures.append((f"{host} / {org_name}", str(e)))
     if failures:

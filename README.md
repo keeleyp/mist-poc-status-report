@@ -7,8 +7,8 @@ For every API key in the ini, the script finds every org the key can see and rep
 - Org name and number of sites
 - APs, switches and gateways: total, online and offline
 - Unique wireless and wired clients (distinct MACs) in the last 24 hours. Wired clients include any Mist devices that the switches see as clients.
-- Audit log entries, and distinct admins, in the last 24 hours
-- **Usage**: *Active* if there were any clients or audit log entries in the last 24 hours, otherwise *Idle*
+- Audit log entries, and distinct admins, in the last 24 hours. Entries by our own accounts are not counted (see below).
+- **Usage**: *Active* if there were any clients, or audit log entries by someone else, in the last 24 hours. Otherwise *Idle*.
 
 The results are printed as a table and saved to an Excel workbook. Every run is time-stamped, so the workbook builds up a trend over time.
 
@@ -34,6 +34,7 @@ gc3             = TOKEN_POC_A, TOKEN_POC_B   # several keys on one cloud
 - A key reports every org in its `/self` privileges. MSP-level access covers every org in that MSP. Orgs where the key only has site-level access are skipped, because the figures need org-wide access.
 - An org that two keys on the same cloud can both see is reported once.
 - `[settings] exclude_orgs` takes a comma-separated list of org names or IDs to leave out.
+- Audit log entries by the owner of each API key, such as the `Accessed Org` entry you create by opening an org, are never counted. Otherwise your own visits would make an idle POC look active. `[settings] exclude_admins` takes a comma-separated list of other internal accounts to ignore, as emails or exact admin names (e.g. `exclude_admins = you@company.com, colleague@company.com`).
 
 ## Run
 
