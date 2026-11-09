@@ -1,0 +1,37 @@
+# One line per Mist cloud: cloud = api_token
+# The cloud can be written as api.eu.mist.com, a short form (eu, gc3, us),
+# or the portal URL (https://manage.eu.mist.com). Tokens only work on the
+# cloud they were made on. For several POCs on the same cloud with separate
+# keys, put the tokens on one line separated by commas.
+# Every org each key can see is reported (MSP access covers all its orgs).
+[clouds]
+api.mist.com = YOUR_GLOBAL01_TOKEN_HERE
+api.eu.mist.com = YOUR_EU_TOKEN_HERE
+gc3 = YOUR_GC3_TOKEN_1_HERE, YOUR_GC3_TOKEN_2_HERE
+
+[settings]
+# Spreadsheet to write. Relative paths are relative to this script. If the
+# file already exists it is updated: one row per org per day, so running
+# again on the same day replaces that day's figures.
+output_file = mist_poc_status.xlsx
+# Optional comma-separated org names or org IDs to leave out of the report.
+exclude_orgs =
+
+# Optional - only needed if you're behind a TLS-inspecting proxy (e.g.
+# Zscaler). Delete this whole section, or leave the values blank, to use
+# normal system defaults (certifi's CA store, and the HTTP_PROXY /
+# HTTPS_PROXY / NO_PROXY environment variables if set).
+[network]
+# Path to a PEM file with your proxy's root CA certificate (or a bundle
+# that includes it), so TLS verification succeeds against its inspected
+# connections. Most Zscaler deployments can export this from the client
+# app, or your IT team will have it.
+ca_bundle =
+# Only set this to false if you have no way to obtain the proxy's CA
+# certificate. This disables TLS certificate verification entirely and is
+# not recommended.
+verify_ssl = true
+# Explicit proxy overrides - usually unnecessary, since requests already
+# honors HTTP_PROXY / HTTPS_PROXY / NO_PROXY from the environment.
+http_proxy =
+https_proxy =
