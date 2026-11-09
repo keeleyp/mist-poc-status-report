@@ -12,13 +12,21 @@ finds every org the key can see and collects:
 The results are printed as a table and saved to an Excel workbook. The
 workbook keeps a History sheet with one row per org per run (date and time),
 a Latest sheet, and one Trend sheet per figure (orgs down the side, run
-times across the top, with a chart).
+times across the top).
+
+After the report, you can pick an org and record its POC details -
+Salesforce record, Sales email, SE email - and add any number of
+time-stamped notes. These are kept in the workbook (POC Details and POC
+Notes sheets) and shown on the Latest sheet. Use --no-edit to skip this,
+e.g. for scheduled runs.
 
 If any cloud or org fails, the script stops, lists the failures and writes
 nothing, so the workbook never holds a partial run.
 """
+import argparse
 import configparser
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -26,10 +34,6 @@ from urllib.parse import urlparse
 
 import requests
 from openpyxl import Workbook, load_workbook
-from openpyxl.chart import LineChart, Reference, Series
-from openpyxl.chart.data_source import AxDataSource, StrRef
-from openpyxl.chart.shapes import GraphicalProperties
-from openpyxl.drawing.line import LineProperties
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -77,6 +81,17 @@ COLUMNS = [
 ]
 HEADERS = [h for h, _ in COLUMNS]
 KEYS = [k for _, k in COLUMNS]
+
+# POC details kept per org (entered by hand after the report), shown at the
+# end of the Latest sheet. Notes are a list of time-stamped entries.
+DETAIL_FIELDS = [
+    ("Salesforce Record", "sf_record", False),
+    ("Sales Email", "sales_email", True),
+    ("SE Email", "se_email", True),
+]
+DETAILS_SHEET = "POC Details"
+NOTES_SHEET = "POC Notes"
+EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 
 # (Trend sheet name, key) - one Trend sheet per figure.
 TRENDS = [
@@ -288,7 +303,8 @@ def collect_org(host, token, org_id, org_name, start, end, run_time):
 # Output
 # --------------------------------------------------------------------------
 def print_table(rows):
-    cols = [("Cloud", lambda r: r["cloud"]),
+    cols = [("#", lambda r: r["_n"]),
+            ("Cloud", lambda r: r["cloud"]),
             ("Org", lambda r: r["org_name"]),
             ("Usage", lambda r: r["usage"]),
             ("Sites", lambda r: r["sites"]),
@@ -298,10 +314,12 @@ def print_table(rows):
             ("WiFi clients", lambda r: r["wireless_clients"]),
             ("Wired clients", lambda r: r["wired_clients"]),
             ("Audit entries", lambda r: r["audit_entries"])]
+    for n, r in enumerate(rows, 1):
+        r["_n"] = n
     cells = [[str(f(r)) for _, f in cols] for r in rows]
     widths = [max(len(h), *(len(c[i]) for c in cells)) if cells else len(h)
               for i, (h, _) in enumerate(cols)]
-    left = {0, 1, 2}
+    left = {1, 2, 3}
 
     def fmt(values):
         return "  ".join(v.ljust(w) if i in left else v.rjust(w)
@@ -326,26 +344,35 @@ def style_header_row(ws, n_cols):
     ws.freeze_panes = "A2"
 
 
-def write_rows_sheet(wb, title, rows, index):
+def write_rows_sheet(wb, title, rows, index, extra=()):
+    """Write History/Latest style rows. extra = [(header, key, width)] columns
+    added after the standard ones (used for the POC details on Latest)."""
     if title in wb.sheetnames:
         del wb[title]
     ws = wb.create_sheet(title, index)
-    ws.append(HEADERS)
+    headers = HEADERS + [h for h, _, _ in extra]
+    keys = KEYS + [k for _, k, _ in extra]
+    ws.append(headers)
     for r in rows:
-        ws.append([r.get(k) for k in KEYS])
-    style_header_row(ws, len(HEADERS))
+        ws.append([r.get(k) for k in keys])
+    style_header_row(ws, len(headers))
     widths = {"Date Time": 17, "Cloud": 18, "Org Name": 32, "Org ID": 38, "Usage": 9}
-    for i, h in enumerate(HEADERS, 1):
+    widths.update({h: w for h, _, w in extra})
+    for i, h in enumerate(headers, 1):
         ws.column_dimensions[get_column_letter(i)].width = widths.get(h, 12)
     usage_col = KEYS.index("usage") + 1
     for r in range(2, ws.max_row + 1):
         cell = ws.cell(r, usage_col)
         cell.fill = ACTIVE_FILL if cell.value == "Active" else IDLE_FILL
+        for c in range(len(HEADERS) + 1, len(headers) + 1):
+            ws.cell(r, c).alignment = Alignment(wrap_text=True, vertical="top")
     ws.auto_filter.ref = ws.dimensions
     return ws
 
 
 def write_trend_sheet(wb, title, key, history):
+    """Orgs down the side, run times across the top. No chart - the numbers
+    read better than a chart once there are more than a handful of orgs."""
     if title in wb.sheetnames:
         del wb[title]
     ws = wb.create_sheet(title)
@@ -366,50 +393,6 @@ def write_trend_sheet(wb, title, key, history):
     for i in range(3, len(dates) + 3):
         ws.column_dimensions[get_column_letter(i)].width = 17
 
-    # Chart only the orgs with a non-zero value in at least one run - the
-    # all-zero ones are still in the table but would just clutter the chart.
-    plotted = [i for i, ok in enumerate(org_keys, start=2)
-               if any(values.get((ok[0], ok[1], d)) for d in dates)]
-    chart_row = len(org_keys) + 4
-    if not dates or not plotted:
-        ws.cell(chart_row, 1, "No chart - every org is 0 for this figure.").font = Font(italic=True)
-        return
-
-    chart = LineChart()
-    chart.title = title.replace("Trend ", "")
-    chart.y_axis.title = chart.title
-    chart.x_axis.title = "Run"
-    # openpyxl hides both axes by default in current Excel - show them.
-    chart.x_axis.delete = False
-    chart.y_axis.delete = False
-    chart.y_axis.scaling.min = 0
-    chart.y_axis.number_format = "#,##0"
-    chart.y_axis.majorGridlines.spPr = GraphicalProperties(ln=LineProperties(solidFill="D9D9D9"))
-    chart.x_axis.tickLblPos = "low"
-    chart.legend.position = "b"
-    # Grow with the number of orgs so the legend has room under the plot.
-    chart.width = min(40, max(24, 6 + 2 * len(dates)))
-    chart.height = 11 + 0.45 * len(plotted)
-
-    categories = Reference(ws, min_col=3, max_col=len(dates) + 2, min_row=1)
-    for row in plotted:
-        series = Series(Reference(ws, min_col=3, max_col=len(dates) + 2, min_row=row),
-                        title=ws.cell(row, 2).value)
-        # Markers so a single run (one point, no line yet) is still visible.
-        series.marker.symbol = "circle"
-        series.marker.size = 6
-        series.smooth = False
-        chart.series.append(series)
-    # Run times are text, so point the categories at them as strings
-    # (a numeric reference makes Excel label the runs 1, 2, 3 ...).
-    cat_ref = str(categories)  # e.g. 'Trend APs Online'!$C$1:$E$1
-    for series in chart.series:
-        series.cat = AxDataSource(strRef=StrRef(f=cat_ref))
-    ws.add_chart(chart, f"A{chart_row}")
-    if len(plotted) < len(org_keys):
-        ws.cell(chart_row - 1, 1, f"{len(org_keys) - len(plotted)} org(s) that are 0 in every run "
-                                  f"are left off the chart.").font = Font(italic=True)
-
 
 def read_history(wb):
     if "History" not in wb.sheetnames:
@@ -427,18 +410,105 @@ def read_history(wb):
     return rows
 
 
-def save_workbook(new_rows):
+# --------------------------------------------------------------------------
+# POC details + notes (kept in the workbook, keyed by cloud + org ID)
+# --------------------------------------------------------------------------
+def read_sheet_dicts(wb, title):
+    if title not in wb.sheetnames:
+        return []
+    ws = wb[title]
+    header = [c.value for c in ws[1]]
+    return [dict(zip(header, v)) for v in ws.iter_rows(min_row=2, values_only=True) if any(v)]
+
+
+def read_details(wb):
+    details = {}
+    for rec in read_sheet_dicts(wb, DETAILS_SHEET):
+        d = {"org_name": rec.get("Org Name") or ""}
+        for header, key, _ in DETAIL_FIELDS:
+            d[key] = str(rec.get(header) or "").strip()
+        details[(rec.get("Cloud"), rec.get("Org ID"))] = d
+    return details
+
+
+def read_notes(wb):
+    notes = {}
+    for rec in read_sheet_dicts(wb, NOTES_SHEET):
+        notes.setdefault((rec.get("Cloud"), rec.get("Org ID")), []).append(
+            (str(rec.get("Date Time") or ""), str(rec.get("Note") or "")))
+    return notes
+
+
+def write_details_sheets(wb, details, notes):
+    for title in (DETAILS_SHEET, NOTES_SHEET):
+        if title in wb.sheetnames:
+            del wb[title]
+
+    ws = wb.create_sheet(DETAILS_SHEET)
+    ws.append(["Cloud", "Org Name", "Org ID"] + [h for h, _, _ in DETAIL_FIELDS])
+    for (cloud, org_id), d in sorted(details.items(), key=lambda i: (i[0][0], i[1]["org_name"].lower())):
+        if any(d.get(k) for _, k, _ in DETAIL_FIELDS):
+            ws.append([cloud, d["org_name"], org_id] + [d.get(k) for _, k, _ in DETAIL_FIELDS])
+    style_header_row(ws, 3 + len(DETAIL_FIELDS))
+    for col, width in zip("ABCDEF", (18, 32, 38, 24, 32, 32)):
+        ws.column_dimensions[col].width = width
+
+    ws = wb.create_sheet(NOTES_SHEET)
+    ws.append(["Cloud", "Org Name", "Org ID", "Date Time", "Note"])
+    for (cloud, org_id), entries in sorted(notes.items()):
+        name = details.get((cloud, org_id), {}).get("org_name", "")
+        for when, text in entries:
+            ws.append([cloud, name, org_id, when, text])
+    style_header_row(ws, 5)
+    for col, width in zip("ABCDE", (18, 32, 38, 17, 90)):
+        ws.column_dimensions[col].width = width
+    for r in range(2, ws.max_row + 1):
+        ws.cell(r, 5).alignment = Alignment(wrap_text=True, vertical="top")
+
+
+def notes_text(entries):
+    return "\n".join(f"{when} - {text}" for when, text in entries)
+
+
+def write_latest(wb, rows, details, notes):
+    latest = []
+    for r in sorted(rows, key=lambda r: (r["cloud"], r["org_name"].lower())):
+        key = (r["cloud"], r["org_id"])
+        d = details.get(key, {})
+        latest.append(dict(r, **{k: d.get(k) for _, k, _ in DETAIL_FIELDS},
+                           notes=notes_text(notes.get(key, []))))
+    extra = [(h, k, 28) for h, k, _ in DETAIL_FIELDS] + [("Notes", "notes", 70)]
+    write_rows_sheet(wb, "Latest", latest, 0, extra)
+
+
+def open_workbook():
     if os.path.exists(OUTPUT_FILE):
         try:
             wb = load_workbook(OUTPUT_FILE)
         except Exception as e:
             sys.exit(f"Could not open {OUTPUT_FILE} ({e}) - is it open in Excel?")
         print(f"\nUpdating {OUTPUT_FILE}")
-    else:
-        wb = Workbook()
-        wb.remove(wb.active)
-        print(f"\nCreating {OUTPUT_FILE}")
+        return wb
+    wb = Workbook()
+    wb.remove(wb.active)
+    print(f"\nCreating {OUTPUT_FILE}")
+    return wb
 
+
+def save(wb, interactive):
+    """Save, and if Excel has the file locked let the user close it and retry."""
+    while True:
+        try:
+            wb.save(OUTPUT_FILE)
+            return
+        except PermissionError:
+            if not interactive:
+                sys.exit(f"Could not save {OUTPUT_FILE} - close it in Excel and run again.")
+            input(f"Could not save {OUTPUT_FILE} - close it in Excel, then press Enter to retry "
+                  f"(Ctrl+C to give up): ")
+
+
+def save_report(wb, new_rows, details, notes, interactive):
     # One row per org per run - every run is kept, except that a re-run in
     # the same minute (same timestamp) replaces the earlier figures.
     run_time = new_rows[0]["date"]
@@ -448,18 +518,97 @@ def save_workbook(new_rows):
     history.extend(new_rows)
     history.sort(key=lambda r: (r["date"], r["cloud"], (r["org_name"] or "").lower()))
 
-    latest = sorted(new_rows, key=lambda r: (r["cloud"], r["org_name"].lower()))
-    write_rows_sheet(wb, "Latest", latest, 0)
+    write_latest(wb, new_rows, details, notes)
     write_rows_sheet(wb, "History", history, 1)
     for title, key in TRENDS:
         write_trend_sheet(wb, title, key, history)
-
-    try:
-        wb.save(OUTPUT_FILE)
-    except PermissionError:
-        sys.exit(f"Could not save {OUTPUT_FILE} - close it in Excel and run again.")
+    write_details_sheets(wb, details, notes)
+    save(wb, interactive)
     runs = len({r["date"] for r in history})
-    print(f"Saved: {len(latest)} org(s) this run, {runs} run(s) of history.")
+    print(f"Saved: {len(new_rows)} org(s) this run, {runs} run(s) of history.")
+
+
+# --------------------------------------------------------------------------
+# Interactive editor
+# --------------------------------------------------------------------------
+def ask_field(label, current, is_email):
+    """Prompt for one field. Enter keeps the current value, '-' clears it."""
+    while True:
+        hint = f" [{current}]" if current else ""
+        value = input(f"  {label}{hint}: ").strip()
+        if not value:
+            return current
+        if value == "-":
+            return ""
+        if is_email and not EMAIL_RE.fullmatch(value):
+            print("    That doesn't look like an email address - try again.")
+            continue
+        return value
+
+
+def show_org(row, d, entries):
+    print(f"\n{row['org_name']}  ({row['cloud']}, {row['org_id']})")
+    for header, key, _ in DETAIL_FIELDS:
+        print(f"  {header + ':':19} {d.get(key) or '-'}")
+    print(f"  Notes ({len(entries)}):")
+    for when, text in entries:
+        print(f"    {when}  {text}")
+    if not entries:
+        print("    (none)")
+
+
+def edit_details(wb, rows, details, notes):
+    rows = sorted(rows, key=lambda r: (r["cloud"], r["org_name"].lower()))
+    while True:
+        print("\nPOC details - enter an org # to view or edit, or press Enter to finish.")
+        for n, r in enumerate(rows, 1):
+            key = (r["cloud"], r["org_id"])
+            d = details.get(key, {})
+            missing = [h for h, k, _ in DETAIL_FIELDS if not d.get(k)]
+            status = "complete" if not missing else "missing: " + ", ".join(missing)
+            print(f"  {n:>3}  {r['org_name'][:40]:40}  {status}; {len(notes.get(key, []))} note(s)")
+        choice = input("Org #: ").strip()
+        if not choice:
+            return
+        if not choice.isdigit() or not 1 <= int(choice) <= len(rows):
+            print(f"  Enter a number from 1 to {len(rows)}.")
+            continue
+
+        row = rows[int(choice) - 1]
+        key = (row["cloud"], row["org_id"])
+        d = details.setdefault(key, {k: "" for _, k, _ in DETAIL_FIELDS})
+        d["org_name"] = row["org_name"]
+        entries = notes.setdefault(key, [])
+        show_org(row, d, entries)
+        before = (dict(d), len(entries))
+
+        missing = [(h, k, e) for h, k, e in DETAIL_FIELDS if not d.get(k)]
+        if missing:
+            print("\nPlease fill in the missing details (Enter to leave blank):")
+            for header, key_name, is_email in missing:
+                d[key_name] = ask_field(header, "", is_email)
+        others = len(missing) < len(DETAIL_FIELDS)
+        if not missing or (others and input("\nEdit the other details? [y/N]: ").strip().lower() == "y"):
+            print("Enter keeps the current value, '-' clears it.")
+            for header, key_name, is_email in DETAIL_FIELDS:
+                if (header, key_name, is_email) not in missing:
+                    d[key_name] = ask_field(header, d.get(key_name, ""), is_email)
+
+        print("\nAdd notes - one per line, press Enter on an empty line to finish.")
+        while True:
+            text = input("  Note: ").strip()
+            if not text:
+                break
+            entries.append((datetime.now().strftime("%Y-%m-%d %H:%M"), text))
+
+        if (dict(d), len(entries)) != before:
+            write_latest(wb, rows, details, notes)
+            write_details_sheets(wb, details, notes)
+            save(wb, True)
+            show_org(row, d, entries)
+            print("  Saved.")
+        else:
+            print("  No changes.")
 
 
 def fail(title, failures):
@@ -472,6 +621,12 @@ def fail(title, failures):
 
 # --------------------------------------------------------------------------
 def main():
+    parser = argparse.ArgumentParser(description="Mist POC status report")
+    parser.add_argument("--no-edit", action="store_true",
+                        help="skip the POC details editor after the report (for scheduled runs)")
+    args = parser.parse_args()
+    interactive = sys.stdin.isatty() and not args.no_edit
+
     keys = load_keys()
     now = int(time.time())
     start, end = now - WINDOW_SECONDS, now
@@ -525,7 +680,18 @@ def main():
         fail("Some orgs failed", failures)
 
     print_table(sorted(rows, key=lambda r: (r["cloud"], r["org_name"].lower())))
-    save_workbook(rows)
+    wb = open_workbook()
+    details, notes = read_details(wb), read_notes(wb)
+    for r in rows:  # keep stored org names current
+        if (r["cloud"], r["org_id"]) in details:
+            details[(r["cloud"], r["org_id"])]["org_name"] = r["org_name"]
+    save_report(wb, rows, details, notes, interactive)
+
+    if interactive:
+        try:
+            edit_details(wb, rows, details, notes)
+        except (KeyboardInterrupt, EOFError):
+            print("\nStopped - details already saved are kept.")
 
 
 if __name__ == "__main__":
